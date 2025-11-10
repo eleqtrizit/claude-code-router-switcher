@@ -1,12 +1,10 @@
-# Makefile for heimdall-thinview
-
 .PHONY: help install dev test lint format clean
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Install package
-	uv sync
+	uv sync --reinstall-package claude-code-router-switcher
 
 install-prod:  ## Install with development dependencies
 	uv sync --no-dev
@@ -34,6 +32,5 @@ clean:  ## Clean build artifacts
 build:  ## Build distribution packages
 	python -m build
 
-
-run:
-	python -m claude-code-router-switcher
+dev:  ## Run CLI tool in dev mode without installation
+	python -m claude_code_router_switcher.cli
