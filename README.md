@@ -1,6 +1,6 @@
 # Claude Code Router Switcher
 
-A CLI tool for managing Claude Code Router configuration. Switch between different AI models and providers for various router types (default, background, think, longContext, webSearch) with a simple command-line interface.
+A CLI tool for managing Claude Code Router configuration. Switch, add, delete, set different AI models and providers for various router types (default, background, think, longContext, webSearch) with a simple command-line interface.
 
 ## Features
 
@@ -12,6 +12,16 @@ A CLI tool for managing Claude Code Router configuration. Switch between differe
 - Add and manage providers and models
 - Auto-detect provider when model name is unique
 
+
+## Fast Install
+Install uv:
+https://docs.astral.sh/uv/getting-started/installation/
+
+Install CLI:
+```
+uv tool install git+https://github.com/eleqtrizit/claude-code-router-switcher
+```
+
 ## Development Setup
 
 ### Prerequisites
@@ -19,15 +29,17 @@ A CLI tool for managing Claude Code Router configuration. Switch between differe
 - Python 3.11 or higher
 - [uv](https://github.com/astral-sh/uv) package manager
 
-### Installation
 
-1. Clone the repository:
+
+### Env Setup
+
+Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/eleqtrizit/claude-code-router-switcher
 cd claude-code-router-switcher
 ```
 
-2. Re/Install the package in development mode:
+Re/Install the package in development mode:
 ```bash
 make install
 ```
