@@ -170,7 +170,7 @@ def change_router(
 
 
 def add_provider(
-    config_manager: ConfigManager, name: str, base_url: str, api_key: str = None
+    config_manager: ConfigManager, name: str, base_url: str, api_key: str = ""
 ) -> None:
     """
     Add a new provider to the configuration.
@@ -181,7 +181,7 @@ def add_provider(
     :type name: str
     :param base_url: API base URL
     :type base_url: str
-    :param api_key: API key (optional)
+    :param api_key: API key (defaults to empty string if not provided)
     :type api_key: str, optional
     """
     # Validate the provider endpoint to determine if /v1 is needed
@@ -198,9 +198,8 @@ def add_provider(
         "models": [],
     }
 
-    # Only add api_key to the provider if it was provided
-    if api_key:
-        provider["api_key"] = api_key
+    # Always add api_key to the provider, even if empty
+    provider["api_key"] = api_key
     print("DEBUG: provider after if =", provider)
 
     try:
@@ -627,7 +626,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--base-url", required=True, help="API base URL", dest="base_url"
     )
     add_provider_parser.add_argument(
-        "--api-key", required=False, help="API key (optional)", dest="api_key"
+        "--api-key", required=False, default="dummy", help="API key (optional)", dest="api_key"
     )
 
     # add model subcommand
@@ -715,7 +714,7 @@ def main() -> None:
             parser.parse_args(["add", "--help"])
             sys.exit(1)
         elif args.add_type == "provider":
-            add_provider(config_manager, args.name, args.base_url, getattr(args, 'api_key', None))
+            add_provider(config_manager, args.name, args.base_url, getattr(args, 'api_key', ""))
         elif args.add_type == "model":
             add_model(config_manager, args.provider, args.model_name)
     elif args.command == "delete":
