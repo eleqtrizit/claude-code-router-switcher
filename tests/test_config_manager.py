@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -220,6 +221,20 @@ class TestConfigManagerAddProvider:
         assert len(providers) == 3
         assert providers[2] == new_provider
 
+    def test_add_provider_without_api_key(self, config_manager: ConfigManager) -> None:
+        """Test adding a new provider without an API key."""
+        new_provider = {
+            "name": "provider3",
+            "api_base_url": "http://example3.com",
+            "models": ["model4"],
+        }
+        config_manager.add_provider(new_provider)
+        providers = config_manager.get_providers()
+        assert len(providers) == 3
+        assert providers[2] == new_provider
+        # Check that the provider doesn't have an api_key field
+        assert "api_key" not in providers[2]
+
     def test_add_provider_to_empty_config(self, empty_config_file: Path) -> None:
         """Test adding provider to empty config."""
         manager = ConfigManager(empty_config_file)
@@ -233,6 +248,26 @@ class TestConfigManagerAddProvider:
         providers = manager.get_providers()
         assert len(providers) == 1
         assert providers[0] == new_provider
+
+    def test_add_provider_duplicate_name(self, config_manager: ConfigManager) -> None:
+        """Test adding provider with duplicate name raises ValueError."""
+        new_provider = {
+            "name": "provider1",  # Same name as existing provider
+            "api_base_url": "http://different.com",
+            "models": [],
+        }
+        with pytest.raises(ValueError, match="Provider with name 'provider1' already exists"):
+            config_manager.add_provider(new_provider)
+
+    def test_add_provider_duplicate_base_url(self, config_manager: ConfigManager) -> None:
+        """Test adding provider with duplicate base URL raises ValueError."""
+        new_provider = {
+            "name": "different_provider",
+            "api_base_url": "http://example.com",  # Same base URL as existing provider1
+            "models": [],
+        }
+        with pytest.raises(ValueError, match="Provider with base URL 'http://example.com' already exists"):
+            config_manager.add_provider(new_provider)
 
 
 class TestConfigManagerAddModelToProvider:
@@ -248,23 +283,23 @@ class TestConfigManagerAddModelToProvider:
     def test_add_model_to_provider_duplicate(self, temp_config_file: Path) -> None:
         """Test adding duplicate model doesn't create duplicates."""
         config_manager = ConfigManager(temp_config_file)
-        
+
         # Verify provider exists and model is already present
         providers_before = config_manager.get_providers()
         provider1_before = next((p for p in providers_before if p["name"] == "provider1"), None)
         assert provider1_before is not None
         assert "model1" in provider1_before["models"]
         initial_count = provider1_before["models"].count("model1")
-        
+
         # Verify config file is valid before operation
         config_before = config_manager.load_config()
         assert "Providers" in config_before
         assert any(p.get("name") == "provider1" for p in config_before["Providers"])
-        
+
         # Adding duplicate should not raise error
         # The function should return early when model already exists
         config_manager.add_model_to_provider("provider1", "model1")
-        
+
         # Verify count hasn't changed
         providers_after = config_manager.get_providers()
         provider1_after = next((p for p in providers_after if p["name"] == "provider1"), None)
@@ -365,3 +400,77 @@ class TestConfigManagerDeleteModel:
         with pytest.raises(ValueError, match="Model 'nonexistent' not found"):
             config_manager.delete_model("nonexistent")
 
+
+class TestConfigManagerValidateProviderEndpoint:
+    """Tests for ConfigManager.validate_provider_endpoint."""
+
+    @patch("requests.get")
+    def test_validate_provider_endpoint_with_v1_success(self, mock_get: MagicMock) -> None:
+        """Test validation when /v1/models endpoint responds successfully."""
+        # Mock successful response for /v1/models
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        result = config_manager.validate_provider_endpoint("http://example.com")
+
+        assert result == "http://example.com/v1"
+        mock_get.assert_called_once_with("http://example.com/v1/models", timeout=10)
+
+    @patch("requests.get")
+    def test_validate_provider_endpoint_without_v1_success(self, mock_get: MagicMock) -> None:
+        """Test validation when /v1/models fails but /models succeeds."""
+        # Mock failure for /v1/models (404)
+        mock_v1_response = MagicMock()
+        mock_v1_response.status_code = 404
+
+        # Mock success for /models (200)
+        mock_models_response = MagicMock()
+        mock_models_response.status_code = 200
+
+        # Configure mock to return different responses based on URL
+        def side_effect(url, timeout=10):
+            if url == "http://example.com/v1/models":
+                return mock_v1_response
+            elif url == "http://example.com/models":
+                return mock_models_response
+            else:
+                raise ValueError("Unexpected URL")
+
+        mock_get.side_effect = side_effect
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        result = config_manager.validate_provider_endpoint("http://example.com")
+
+        assert result == "http://example.com"
+        assert mock_get.call_count == 2
+        mock_get.assert_any_call("http://example.com/v1/models", timeout=10)
+        mock_get.assert_any_call("http://example.com/models", timeout=10)
+
+    @patch("requests.get")
+    def test_validate_provider_endpoint_both_fail(self, mock_get: MagicMock) -> None:
+        """Test validation when both endpoints fail."""
+        # Mock exceptions for both endpoints
+        from requests import RequestException
+        mock_get.side_effect = RequestException("Network error")
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        result = config_manager.validate_provider_endpoint("http://example.com")
+
+        assert result == "http://example.com"  # Should return original URL
+        assert mock_get.call_count == 2
+
+    @patch("requests.get")
+    def test_validate_provider_endpoint_with_trailing_slash(self, mock_get: MagicMock) -> None:
+        """Test validation handles trailing slashes correctly."""
+        # Mock successful response for /v1/models
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        result = config_manager.validate_provider_endpoint("http://example.com/")
+
+        assert result == "http://example.com/v1"
+        mock_get.assert_called_once_with("http://example.com/v1/models", timeout=10)

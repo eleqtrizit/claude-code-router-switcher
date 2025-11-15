@@ -9,6 +9,7 @@ dependencies = [
     "flake8>=7.3.0",
     "isort>=7.0.0",
     "mypy>=1.18.2",
+    "requests>=2.32.0",
     "rich>=14.2.0",
 ]
 

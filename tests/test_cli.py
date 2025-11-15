@@ -1,7 +1,6 @@
 """Tests for CLI functions."""
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,10 +15,12 @@ from claude_code_router_switcher.cli import (
     delete_model,
     delete_provider,
     delete_router,
+    fetch_models_from_endpoint,
     list_models,
     main,
     set_long_context_threshold,
     show_config,
+    update_models,
 )
 from claude_code_router_switcher.config_manager import ConfigManager
 
@@ -211,11 +212,34 @@ class TestAddProvider:
         self, mock_console: MagicMock, config_manager: ConfigManager
     ) -> None:
         """Test adding a provider successfully."""
-        add_provider(config_manager, "provider3", "http://example3.com", "key3")
-        providers = config_manager.get_providers()
-        assert len(providers) == 3
-        assert providers[2]["name"] == "provider3"
-        mock_console.print.assert_called_with("[green]Added provider: provider3[/green]")
+        # Mock the validate_provider_endpoint to return the same URL
+        with patch.object(config_manager, 'validate_provider_endpoint', return_value="http://example3.com"):
+            add_provider(config_manager, "provider3", "http://example3.com", "key3")
+            providers = config_manager.get_providers()
+            assert len(providers) == 3
+            assert providers[2]["name"] == "provider3"
+            # Check that both success message and tip message are printed
+            calls = [call[0][0] for call in mock_console.print.call_args_list]
+            assert "[green]Added provider: provider3[/green]" in calls
+            assert any("Tip: Run 'ccs update'" in call for call in calls)
+
+    @patch("claude_code_router_switcher.cli.console")
+    def test_add_provider_without_api_key(
+        self, mock_console: MagicMock, config_manager: ConfigManager
+    ) -> None:
+        """Test adding a provider without an API key."""
+        # Mock the validate_provider_endpoint to return the same URL
+        with patch.object(config_manager, 'validate_provider_endpoint', return_value="http://example3.com"):
+            add_provider(config_manager, "provider3", "http://example3.com", None)
+            providers = config_manager.get_providers()
+            assert len(providers) == 3
+            assert providers[2]["name"] == "provider3"
+            # Check that the provider doesn't have an api_key field
+            assert "api_key" not in providers[2]
+            # Check that both success message and tip message are printed
+            calls = [call[0][0] for call in mock_console.print.call_args_list]
+            assert "[green]Added provider: provider3[/green]" in calls
+            assert any("Tip: Run 'ccs update'" in call for call in calls)
 
     @patch("claude_code_router_switcher.cli.console")
     @patch("claude_code_router_switcher.cli.sys")
@@ -228,6 +252,40 @@ class TestAddProvider:
         add_provider(manager, "provider1", "http://example.com", "key1")
         assert mock_sys.exit.called
         assert mock_sys.exit.call_args[0][0] == 1
+
+    @patch("claude_code_router_switcher.cli.console")
+    @patch("claude_code_router_switcher.cli.sys")
+    def test_add_provider_duplicate_name(
+        self, mock_sys: MagicMock, mock_console: MagicMock, config_manager: ConfigManager
+    ) -> None:
+        """Test adding provider with duplicate name."""
+        # Mock the validate_provider_endpoint to return the same URL
+        with patch.object(config_manager, 'validate_provider_endpoint', return_value="http://different.com"):
+            add_provider(config_manager, "provider1", "http://different.com", "key1")
+            assert mock_sys.exit.called
+            assert mock_sys.exit.call_args[0][0] == 1
+            # Check that error message is printed
+            mock_console.print.assert_called()
+            error_call = mock_console.print.call_args[0][0]
+            assert "Error:" in error_call
+            assert "already exists" in error_call
+
+    @patch("claude_code_router_switcher.cli.console")
+    @patch("claude_code_router_switcher.cli.sys")
+    def test_add_provider_duplicate_base_url(
+        self, mock_sys: MagicMock, mock_console: MagicMock, config_manager: ConfigManager
+    ) -> None:
+        """Test adding provider with duplicate base URL."""
+        # Mock the validate_provider_endpoint to return the same URL as existing provider
+        with patch.object(config_manager, 'validate_provider_endpoint', return_value="http://example.com"):
+            add_provider(config_manager, "different_provider", "http://example.com", "key1")
+            assert mock_sys.exit.called
+            assert mock_sys.exit.call_args[0][0] == 1
+            # Check that error message is printed
+            mock_console.print.assert_called()
+            error_call = mock_console.print.call_args[0][0]
+            assert "Error:" in error_call
+            assert "already exists" in error_call
 
 
 class TestAddModel:
@@ -388,7 +446,10 @@ class TestCreateParser:
         assert args.router_type == "default"
         assert args.model_value == "provider1,model1"
 
-        args = parser.parse_args(["add", "provider", "--name", "test", "--base-url", "http://test.com", "--api-key", "key"])
+        args = parser.parse_args([
+            "add", "provider", "--name", "test", "--base-url",
+            "http://test.com", "--api-key", "key"
+        ])
         assert args.command == "add"
         assert args.add_type == "provider"
         assert args.name == "test"
@@ -455,7 +516,10 @@ class TestMain:
         main()
         mock_change_router.assert_called_once_with(mock_manager, "default", "provider1,model1")
 
-    @patch("claude_code_router_switcher.cli.sys.argv", ["ccs", "add", "provider", "--name", "test", "--base-url", "http://test.com", "--api-key", "key"])
+    @patch("claude_code_router_switcher.cli.sys.argv", [
+        "ccs", "add", "provider", "--name", "test", "--base-url",
+        "http://test.com", "--api-key", "key"
+    ])
     @patch("claude_code_router_switcher.cli.add_provider")
     @patch("claude_code_router_switcher.cli.ConfigManager")
     def test_main_add_provider_command(
@@ -466,6 +530,21 @@ class TestMain:
         mock_config_manager_class.return_value = mock_manager
         main()
         mock_add_provider.assert_called_once_with(mock_manager, "test", "http://test.com", "key")
+
+    @patch("claude_code_router_switcher.cli.sys.argv", [
+        "ccs", "add", "provider", "--name", "test", "--base-url",
+        "http://test.com"
+    ])
+    @patch("claude_code_router_switcher.cli.add_provider")
+    @patch("claude_code_router_switcher.cli.ConfigManager")
+    def test_main_add_provider_without_api_key(
+        self, mock_config_manager_class: MagicMock, mock_add_provider: MagicMock
+    ) -> None:
+        """Test main function with add provider command without API key."""
+        mock_manager = MagicMock()
+        mock_config_manager_class.return_value = mock_manager
+        main()
+        mock_add_provider.assert_called_once_with(mock_manager, "test", "http://test.com", None)
 
     @patch("claude_code_router_switcher.cli.sys.argv", ["ccs", "add", "model", "provider1", "model1"])
     @patch("claude_code_router_switcher.cli.add_model")
@@ -700,7 +779,9 @@ class TestChangeRouterLongContext:
         for call in mock_console.print.call_args_list:
             if call and call[0]:
                 print_calls.append(str(call[0][0]))
-        assert any("longContextThreshold" in call and "Tip" in call for call in print_calls), f"Expected warning not found. Calls: {print_calls}"
+        assert any(
+            "longContextThreshold" in call and "Tip" in call for call in print_calls
+        ), f"Expected warning not found. Calls: {print_calls}"
         assert any("ccs set longContextThreshold" in call for call in print_calls)
 
 
@@ -765,3 +846,187 @@ class TestShowConfigLongContextThreshold:
         show_config(config_manager)
         assert mock_console.print.called
 
+
+class TestUpdateModels:
+    """Tests for update_models function."""
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    @patch("claude_code_router_switcher.cli.console")
+    def test_update_models_success(
+        self, mock_console: MagicMock, mock_get: MagicMock, config_manager: ConfigManager
+    ) -> None:
+        """Test updating models successfully."""
+        # Mock the API response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": [
+                {"id": "model1"},
+                {"id": "model2"},
+                {"id": "model3"}
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        # Initially provider1 has model1 and model2
+        # After update, it should have model1, model2, model3 (model3 added)
+        update_models(config_manager)
+
+        # Check that models were updated
+        providers = config_manager.get_providers()
+        provider1 = next(p for p in providers if p["name"] == "provider1")
+        assert set(provider1["models"]) == {"model1", "model2", "model3"}
+
+        # Verify console output
+        print_calls = [str(call[0][0]) for call in mock_console.print.call_args_list if call[0]]
+        assert any("Update completed!" in call for call in print_calls)
+        assert any("Added" in call for call in print_calls)
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    @patch("claude_code_router_switcher.cli.console")
+    def test_update_models_no_providers(
+        self, mock_console: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Test updating models when no providers exist."""
+        empty_config = Path(tempfile.mktemp(suffix=".json"))
+        try:
+            with open(empty_config, "w") as f:
+                json.dump({}, f)
+            manager = ConfigManager(empty_config)
+
+            update_models(manager)
+
+            mock_console.print.assert_called_with("[yellow]No providers found in config[/yellow]")
+        finally:
+            empty_config.unlink(missing_ok=True)
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    @patch("claude_code_router_switcher.cli.console")
+    def test_update_models_network_error(
+        self, mock_console: MagicMock, mock_get: MagicMock, config_manager: ConfigManager
+    ) -> None:
+        """Test updating models with network error."""
+        from requests import RequestException
+        mock_get.side_effect = RequestException("Network error")
+
+        update_models(config_manager)
+
+        # Should still complete without crashing
+        print_calls = [str(call[0][0]) for call in mock_console.print.call_args_list if call[0]]
+        assert any("Update completed!" in call for call in print_calls)
+        assert any("Warning: Failed to fetch models" in call for call in print_calls)
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    @patch("claude_code_router_switcher.cli.console")
+    def test_update_models_file_not_found(
+        self, mock_console: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Test updating models when config file doesn't exist."""
+        non_existent = Path("/nonexistent/config.json")
+        manager = ConfigManager(non_existent)
+
+        with patch("claude_code_router_switcher.cli.sys.exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            with pytest.raises(SystemExit):
+                update_models(manager)
+
+            assert mock_exit.called
+            assert mock_exit.call_args[0][0] == 1
+            assert any(
+                "Error:" in str(call)
+                for call in mock_console.print.call_args_list
+            )
+
+
+class TestFetchModelsFromEndpoint:
+    """Tests for fetch_models_from_endpoint function."""
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    def test_fetch_models_openai_format(self, mock_get: MagicMock) -> None:
+        """Test fetching models with OpenAI-like response format."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": [
+                {"id": "model1"},
+                {"id": "model2"}
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        models = fetch_models_from_endpoint("http://example.com/v1")
+
+        assert set(models) == {"model1", "model2"}
+        mock_get.assert_called_once()
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    def test_fetch_models_direct_list(self, mock_get: MagicMock) -> None:
+        """Test fetching models with direct list response."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = ["model1", "model2"]
+        mock_get.return_value = mock_response
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        models = fetch_models_from_endpoint("http://example.com/v1")
+
+        assert set(models) == {"model1", "model2"}
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    def test_fetch_models_auth_required(self, mock_get: MagicMock) -> None:
+        """Test fetching models with authentication."""
+        # First call returns 401, second call returns 200
+        mock_unauthorized = MagicMock()
+        mock_unauthorized.status_code = 401
+
+        mock_success = MagicMock()
+        mock_success.status_code = 200
+        mock_success.json.return_value = {"data": [{"id": "model1"}]}
+
+        mock_get.side_effect = [mock_unauthorized, mock_success]
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        models = fetch_models_from_endpoint("http://example.com/v1", "test-key")
+
+        assert models == ["model1"]
+        assert mock_get.call_count == 2
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    def test_fetch_models_not_found(self, mock_get: MagicMock) -> None:
+        """Test fetching models when endpoint returns 404."""
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_get.return_value = mock_response
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        models = fetch_models_from_endpoint("http://example.com/v1")
+
+        assert models == []
+
+    @patch("claude_code_router_switcher.cli.requests.get")
+    def test_fetch_models_network_error(self, mock_get: MagicMock) -> None:
+        """Test fetching models with network error."""
+        from requests import RequestException
+        mock_get.side_effect = RequestException("Network error")
+
+        config_manager = ConfigManager(Path("/tmp/test.json"))  # Dummy path
+        models = fetch_models_from_endpoint("http://example.com/v1")
+
+        assert models == []
+
+
+class TestMainUpdate:
+    """Tests for main function with update command."""
+
+    @patch("claude_code_router_switcher.cli.sys.argv", ["ccs", "update"])
+    @patch("claude_code_router_switcher.cli.update_models")
+    @patch("claude_code_router_switcher.cli.ConfigManager")
+    def test_main_update_command(
+        self, mock_config_manager_class: MagicMock, mock_update_models: MagicMock
+    ) -> None:
+        """Test main function with update command."""
+        mock_manager = MagicMock()
+        mock_config_manager_class.return_value = mock_manager
+        main()
+        mock_update_models.assert_called_once_with(mock_manager)

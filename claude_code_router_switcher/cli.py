@@ -1,9 +1,11 @@
 """CLI interface for the configuration switcher."""
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
+import requests
 from claude_code_router_switcher.config_manager import ConfigManager
 from rich.console import Console
 from rich.table import Table
@@ -66,7 +68,7 @@ def show_config(config_manager: ConfigManager) -> None:
 
 
 def change_router(
-    config_manager: ConfigManager, router_type: str, model_value: str
+    config_manager: ConfigManager, router_type: str, model_value: str, no_restart: bool = False
 ) -> None:
     """
     Change a router configuration value.
@@ -77,6 +79,8 @@ def change_router(
     :type router_type: str
     :param model_value: Model value in format <provider>,<model> or just <model>
     :type model_value: str
+    :param no_restart: If True, don't restart the CCR service after changing
+    :type no_restart: bool
     """
     valid_types = ["default", "background", "think", "longContext", "webSearch"]
     if router_type not in valid_types:
@@ -139,6 +143,20 @@ def change_router(
         console.print(
             f"[green]Updated {router_type} to: {final_value}[/green]"
         )
+
+        # Issue ccr stop command after successful change (unless --no-restart is specified)
+        if not no_restart:
+            try:
+                subprocess.run(["ccr", "stop"], check=True, capture_output=True)
+                console.print("[blue]Issued ccr stop command[/blue]")
+                console.print("[blue]ccr service was stopped so new model can activate[/blue]")
+            except subprocess.CalledProcessError as e:
+                console.print(f"[yellow]Warning: Failed to issue ccr stop command: {e}[/yellow]")
+            except FileNotFoundError:
+                console.print("[yellow]Warning: ccr command not found. Please ensure it is installed.[/yellow]")
+        else:
+            console.print("[blue]Configuration updated without restarting CCR service[/blue]")
+
         if router_type == "longContext":
             console.print(
                 "\n[yellow]Tip: Set longContextThreshold next to enable:[/yellow]"
@@ -152,7 +170,7 @@ def change_router(
 
 
 def add_provider(
-    config_manager: ConfigManager, name: str, base_url: str, api_key: str
+    config_manager: ConfigManager, name: str, base_url: str, api_key: str = None
 ) -> None:
     """
     Add a new provider to the configuration.
@@ -163,19 +181,38 @@ def add_provider(
     :type name: str
     :param base_url: API base URL
     :type base_url: str
-    :param api_key: API key
-    :type api_key: str
+    :param api_key: API key (optional)
+    :type api_key: str, optional
     """
+    # Validate the provider endpoint to determine if /v1 is needed
+    try:
+        validated_base_url = config_manager.validate_provider_endpoint(base_url)
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not validate provider endpoint: {e}[/yellow]")
+        console.print("[yellow]Using provided base URL as-is.[/yellow]")
+        validated_base_url = base_url
+
     provider = {
         "name": name,
-        "api_base_url": base_url,
-        "api_key": api_key,
+        "api_base_url": validated_base_url,
         "models": [],
     }
 
+    # Only add api_key to the provider if it was provided
+    if api_key:
+        provider["api_key"] = api_key
+    print("DEBUG: provider after if =", provider)
+
     try:
         config_manager.add_provider(provider)
-        console.print(f"[green]Added provider: {name}[/green]")
+        if validated_base_url != base_url:
+            console.print(f"[green]Added provider: {name} (base URL adjusted to: {validated_base_url})[/green]")
+        else:
+            console.print(f"[green]Added provider: {name}[/green]")
+        console.print("[yellow]Tip: Run 'ccs update' to fetch models from the new provider[/yellow]")
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
     except FileNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
@@ -351,6 +388,189 @@ def set_long_context_threshold(config_manager: ConfigManager, threshold: int) ->
         sys.exit(1)
 
 
+def fetch_models_from_endpoint(base_url: str, api_key: str = None) -> list[str]:
+    """
+    Fetch models from a provider endpoint.
+
+    :param base_url: Base URL of the provider
+    :type base_url: str
+    :param api_key: API key for authentication (optional)
+    :type api_key: str, optional
+    :return: List of model names
+    :rtype: list[str]
+    """
+    # Construct the models endpoint URL
+    if base_url.endswith('/'):
+        base_url = base_url[:-1]
+
+    # Try both /v1/models and /models endpoints
+    # Check if base_url already ends with /v1 or /v1/... to avoid double /v1
+    if base_url.endswith('/v1') or '/v1/' in base_url:
+        # Extract the base part before /v1
+        if base_url.endswith('/v1'):
+            # URL ends with /v1, so we can try /v1/models and /models
+            urls_to_try = [
+                f"{base_url}/models",  # This becomes /v1/models
+                f"{base_url[:-3]}/models"  # This becomes /models (without v1)
+            ]
+        else:
+            # URL contains /v1/ somewhere, extract the part before /v1/
+            v1_index = base_url.find('/v1/')
+            base_part = base_url[:v1_index]
+            urls_to_try = [
+                f"{base_part}/v1/models",  # Standard /v1/models
+                f"{base_part}/models"      # Without v1
+            ]
+    else:
+        # No /v1 in URL, try adding /v1
+        urls_to_try = [
+            f"{base_url}/v1/models",
+            f"{base_url}/models"
+        ]
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    for url in urls_to_try:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                # Handle different response formats
+                if "data" in data:
+                    # OpenAI-like format
+                    return [item["id"] for item in data["data"] if "id" in item]
+                elif "models" in data:
+                    # Some providers might return models directly
+                    return data["models"]
+                elif isinstance(data, list):
+                    # Direct list of models
+                    return data
+                else:
+                    # Fallback - try to get any list-like structure
+                    console.print(f"[yellow]Warning: Unexpected response format from {url}[/yellow]")
+                    return []
+            elif response.status_code == 401:
+                console.print(f"[yellow]Warning: Authentication required for {url}[/yellow]")
+                continue
+            elif response.status_code == 404:
+                continue
+            else:
+                console.print(f"[yellow]Warning: HTTP {response.status_code} from {url}[/yellow]")
+                continue
+        except requests.RequestException as e:
+            console.print(f"[yellow]Warning: Failed to fetch models from {url}: {e}[/yellow]")
+            continue
+
+    return []
+
+
+def update_models(config_manager: ConfigManager) -> None:
+    """
+    Update models from provider endpoints.
+
+    :param config_manager: Configuration manager instance
+    :type config_manager: ConfigManager
+    """
+    try:
+        # Get current providers
+        providers = config_manager.get_providers()
+        if not providers:
+            console.print("[yellow]No providers found in config[/yellow]")
+            return
+
+        # Statistics for reporting
+        added_models = []
+        removed_models = []
+        retained_models = []
+
+        # Process each provider
+        for provider in providers:
+            provider_name = provider["name"]
+            base_url = provider["api_base_url"]
+            api_key = provider.get("api_key")
+            current_models = set(provider.get("models", []))
+
+            console.print(f"[blue]Fetching models from {provider_name} ({base_url})...[/blue]")
+
+            # Fetch models from endpoint
+            fetched_models = set(fetch_models_from_endpoint(base_url, api_key))
+
+            if not fetched_models:
+                console.print(f"[yellow]No models fetched from {provider_name}. Keeping existing models.[/yellow]")
+                retained_models.extend([(provider_name, model) for model in current_models])
+                continue
+
+            # Determine which models to add, remove, or retain
+            models_to_add = fetched_models - current_models
+            models_to_remove = current_models - fetched_models
+            models_to_retain = current_models & fetched_models
+
+            # Add new models
+            for model in models_to_add:
+                try:
+                    config_manager.add_model_to_provider(provider_name, model)
+                    added_models.append((provider_name, model))
+                except ValueError as e:
+                    console.print(f"[red]Error adding model {model} to {provider_name}: {e}[/red]")
+
+            # Remove missing models (but be careful not to remove models used in routers)
+            router_config = config_manager.get_router_config()
+            used_models = set()
+            for router_type, value in router_config.items():
+                if router_type != "longContextThreshold" and isinstance(value, str) and "," in value:
+                    _, model = value.rsplit(",", 1)
+                    used_models.add(model.strip())
+
+            for model in models_to_remove:
+                # Only remove if not used in any router configuration
+                if model not in used_models:
+                    try:
+                        config_manager.delete_model(model)
+                        removed_models.append((provider_name, model))
+                    except ValueError as e:
+                        console.print(f"[red]Error removing model {model}: {e}[/red]")
+                else:
+                    # Keep the model if it's used in a router configuration
+                    retained_models.append((provider_name, model))
+
+            # Add retained models to statistics
+            for model in models_to_retain:
+                retained_models.append((provider_name, model))
+
+        # Report statistics
+        console.print("\n[bold green]Update completed![/bold green]")
+        if added_models:
+            console.print(f"\n[green]Added {len(added_models)} model(s):[/green]")
+            for provider, model in added_models:
+                console.print(f"  • {provider}: {model}")
+
+        if removed_models:
+            console.print(f"\n[red]Removed {len(removed_models)} model(s):[/red]")
+            for provider, model in removed_models:
+                console.print(f"  • {provider}: {model}")
+
+        if retained_models:
+            console.print(f"\n[blue]Retained {len(retained_models)} model(s):[/blue]")
+            # Group by provider for cleaner output
+            retained_by_provider = {}
+            for provider, model in retained_models:
+                if provider not in retained_by_provider:
+                    retained_by_provider[provider] = []
+                retained_by_provider[provider].append(model)
+
+            for provider, models in retained_by_provider.items():
+                console.print(f"  • {provider}: {', '.join(models)}")
+
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error during update: {e}[/red]")
+        sys.exit(1)
+
+
 def create_parser() -> argparse.ArgumentParser:
     """
     Create and configure the argument parser.
@@ -388,6 +608,11 @@ def create_parser() -> argparse.ArgumentParser:
         "model_value",
         help="Model value in format <provider>,<model> or just <model> (auto-detects provider if unique)",
     )
+    change_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Don't restart the CCR service after changing the configuration",
+    )
 
     # add command with subcommands
     add_parser = subparsers.add_parser("add", help="Add provider or model")
@@ -402,7 +627,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--base-url", required=True, help="API base URL", dest="base_url"
     )
     add_provider_parser.add_argument(
-        "--api-key", required=True, help="API key", dest="api_key"
+        "--api-key", required=False, help="API key (optional)", dest="api_key"
     )
 
     # add model subcommand
@@ -459,6 +684,9 @@ def create_parser() -> argparse.ArgumentParser:
         "threshold", type=int, help="Threshold value as integer"
     )
 
+    # update command
+    subparsers.add_parser("update", help="Update models from provider endpoints")
+
     return parser
 
 
@@ -480,13 +708,14 @@ def main() -> None:
     elif args.command == "show":
         show_config(config_manager)
     elif args.command == "change":
-        change_router(config_manager, args.router_type, args.model_value)
+        no_restart = getattr(args, "no_restart", False)
+        change_router(config_manager, args.router_type, args.model_value, no_restart)
     elif args.command == "add":
         if not hasattr(args, "add_type") or args.add_type is None:
             parser.parse_args(["add", "--help"])
             sys.exit(1)
         elif args.add_type == "provider":
-            add_provider(config_manager, args.name, args.base_url, args.api_key)
+            add_provider(config_manager, args.name, args.base_url, getattr(args, 'api_key', None))
         elif args.add_type == "model":
             add_model(config_manager, args.provider, args.model_name)
     elif args.command == "delete":
@@ -508,3 +737,5 @@ def main() -> None:
             sys.exit(1)
         elif args.set_type == "longContextThreshold":
             set_long_context_threshold(config_manager, args.threshold)
+    elif args.command == "update":
+        update_models(config_manager)

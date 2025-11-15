@@ -79,14 +79,39 @@ class ConfigManager:
         """
         Add a new provider to the config.
 
-        :param provider: Provider dictionary with name, api_base_url, api_key, and optionally models
+        :param provider: Provider dictionary with name, api_base_url, and optionally api_key and models
         :type provider: Dict[str, Any]
+        :raises ValueError: If provider with same name or base URL already exists
         """
+        # Check for duplicates before adding
+        self._check_duplicate_provider(provider)
+
         config = self.load_config()
         providers = config.get("Providers", [])
         providers.append(provider)
         config["Providers"] = providers
         self.save_config(config)
+
+    def _check_duplicate_provider(self, new_provider: Dict[str, Any]) -> None:
+        """
+        Check if a provider with the same name or base URL already exists.
+
+        :param new_provider: New provider to check
+        :type new_provider: Dict[str, Any]
+        :raises ValueError: If provider with same name or base URL already exists
+        """
+        providers = self.get_providers()
+        new_name = new_provider.get("name")
+        new_base_url = new_provider.get("api_base_url")
+
+        for provider in providers:
+            # Check for duplicate name
+            if provider.get("name") == new_name:
+                raise ValueError(f"Provider with name '{new_name}' already exists")
+
+            # Check for duplicate base URL
+            if provider.get("api_base_url") == new_base_url:
+                raise ValueError(f"Provider with base URL '{new_base_url}' already exists")
 
     def add_model_to_provider(self, provider_name: str, model_name: str) -> None:
         """
@@ -189,3 +214,86 @@ class ConfigManager:
             raise ValueError(f"Model '{model_name}' not found in any provider")
         self.save_config(config)
 
+    def validate_provider_endpoint(self, base_url: str) -> str:
+        """
+        Validate a provider endpoint by checking if /v1 is needed in the base URL.
+
+        This function will:
+        1. Try base_url/v1/models first
+        2. If that fails, try base_url/models
+        3. Return the correct base URL format based on which endpoint responds
+
+        :param base_url: Base URL of the provider
+        :type base_url: str
+        :return: Corrected base URL
+        :rtype: str
+        """
+        import requests
+
+        # Remove trailing slash if present
+        base_url = base_url.rstrip('/')
+
+        # Flag to track if we should try without /v1
+        should_try_without_v1 = False
+
+        # Check if base_url already ends with /v1 or /v1/... to avoid double /v1
+        if base_url.endswith('/v1') or '/v1/' in base_url:
+            # Extract the base part before /v1
+            if base_url.endswith('/v1'):
+                # URL ends with /v1, so we can try /v1/models and /models
+                v1_url = f"{base_url}/models"  # This becomes /v1/models
+                no_v1_url = f"{base_url[:-3]}/models"  # This becomes /models (without v1)
+            else:
+                # URL contains /v1/ somewhere, extract the part before /v1/
+                v1_index = base_url.find('/v1/')
+                base_part = base_url[:v1_index]
+                v1_url = f"{base_part}/v1/models"  # Standard /v1/models
+                no_v1_url = f"{base_part}/models"  # Without v1
+        else:
+            # No /v1 in URL, try adding /v1
+            v1_url = f"{base_url}/v1/models"
+            no_v1_url = f"{base_url}/models"
+
+        try:
+            response = requests.get(v1_url, timeout=10)
+            # If we get a successful response (2xx) it means the endpoint exists with /v1
+            if 200 <= response.status_code < 300:
+                if base_url.endswith('/v1'):
+                    return base_url  # Already has /v1, so return as-is
+                else:
+                    return f"{base_url}/v1"
+            # If we get a 404, it means /v1 doesn't exist, so we should try without /v1
+            elif response.status_code == 404:
+                should_try_without_v1 = True
+            # If we get other 4xx errors (like 401, 403), it means the endpoint exists but requires auth
+            elif 400 <= response.status_code < 500:
+                if base_url.endswith('/v1'):
+                    return base_url  # Already has /v1, so return as-is
+                else:
+                    return f"{base_url}/v1"
+        except requests.RequestException:
+            # If there's a network error, we'll try the other option
+            should_try_without_v1 = True
+
+        # Try without /v1 if needed
+        if should_try_without_v1:
+            try:
+                response = requests.get(no_v1_url, timeout=10)
+                # If we get a successful response (2xx) it means the endpoint exists without /v1
+                if 200 <= response.status_code < 300:
+                    if base_url.endswith('/v1'):
+                        return base_url[:-3]  # Remove /v1 from the base URL
+                    else:
+                        return base_url
+                # If we get other 4xx errors (like 401, 403), it means the endpoint exists but requires auth
+                elif 400 <= response.status_code < 500:
+                    if base_url.endswith('/v1'):
+                        return base_url[:-3]  # Remove /v1 from the base URL
+                    else:
+                        return base_url
+            except requests.RequestException:
+                # If both attempts fail, return the original URL
+                pass
+
+        # If both attempts fail, return the original URL
+        return base_url
